@@ -1,4 +1,18 @@
-"""PyWebView API - 记账应用接口（增强版）"""
+"""PyWebView 前后端桥接层。
+
+这个文件不直接做复杂记账计算，核心职责是：
+1. 把 web/app.js 里的 pywebview.api.xxx 调用暴露给前端。
+2. 把参数转发给 BookkeepingService。
+3. 在少数场景补充桥接层逻辑，例如：
+   - 统计页默认时间范围的推导
+   - 主题配置读写
+   - 数据备份导入导出与回滚
+
+建议的排障阅读顺序：
+- 前端按钮点击后没有反应：先确认 app.js 是否调用了正确的 pywebview.api 方法名。
+- 返回了 success=false：优先看 api_error_handler 包装后的错误类型和 message。
+- 桥接层本身没有额外逻辑时，再继续看 services/bookkeeping.py 中对应方法。
+"""
 import json
 import traceback
 from datetime import datetime, timedelta
@@ -8,9 +22,12 @@ from typing import List, Dict, Any
 from services.bookkeeping import BookkeepingService
 
 
+# 统一把 Python 异常转成前端更容易消费的结构化结果，
+# 避免 pywebview 直接把异常抛回 JS 侧后难以区分是校验问题、文件问题还是未知错误。
 def api_error_handler(func):
-    """API错误处理装饰器"""
+    """API 错误处理装饰器。"""
     def wrapper(*args, **kwargs):
+        # 这里不吞掉业务结果，只在抛异常时转换为 {success, error, error_type}。
         try:
             return func(*args, **kwargs)
         except ValueError as e:
@@ -30,14 +47,28 @@ def api_error_handler(func):
 
 
 class Api:
+    """pywebview 暴露给前端的 API 集合。
+
+    上游：
+    - main.py 在创建窗口时把 Api 实例挂到 js_api。
+    - web/app.js 通过 pywebview.api.<method>() 调用这里的方法。
+
+    下游：
+    - 大多数方法继续委托给 BookkeepingService。
+    - 少量方法负责主题配置、时间区间推导、备份导入导出。
+    """
+
     def __init__(self, data_dir: Path):
+        # data_dir 是应用运行目录或打包后的用户数据目录；实际账本数据都在其下的“记账数据/”。
         self.data_dir = data_dir
         self.bookkeeping = BookkeepingService(data_dir / "记账数据")
 
     def __dir__(self):
+        # pywebview 会根据对象可见方法名生成 JS 可调用接口，这里显式限制为类上可调用成员。
         return [name for name, val in self.__class__.__dict__.items() if callable(val)]
 
     # ========== 分类管理（含多级） ==========
+    # 对应前端：分类管理页、记一笔页面的分类选择器。
     def get_categories(self, type_filter: str = "", include_children: bool = True):
         return self.bookkeeping.get_categories(type_filter, include_children)
 
@@ -57,6 +88,7 @@ class Api:
         return self.bookkeeping.delete_category(id, strategy, migrate_to)
 
     # ========== 标签管理 ==========
+    # 当前前端主要把标签作为记录辅助信息，接口较薄，基本只做转发。
     def get_tags(self, category_id: str = ""):
         return self.bookkeeping.get_tags(category_id)
 
@@ -69,6 +101,7 @@ class Api:
         return self.bookkeeping.delete_tag(id)
 
     # ========== 账户管理 ==========
+    # 对应前端：账户管理页、记一笔页账户下拉、转账/对账弹窗。
     def get_accounts(self):
         return self.bookkeeping.get_accounts()
 
@@ -96,6 +129,7 @@ class Api:
         return self.bookkeeping.adjust_balance(account_id, new_balance, note)
 
     # ========== 预算管理 ==========
+    # 对应前端：预算列表、预算设置弹窗、保存记录后的预算提醒弹窗。
     def get_budgets(self, ledger_id: str = ""):
         return self.bookkeeping.get_budgets(ledger_id)
 
@@ -115,6 +149,7 @@ class Api:
         return self.bookkeeping.get_budget_status(ledger_id)
 
     # ========== 账本管理 ==========
+    # 对应前端：侧边栏账本切换器、账本管理页。
     def get_ledgers(self, include_archived: bool = False):
         return self.bookkeeping.get_ledgers(include_archived)
 
@@ -135,6 +170,7 @@ class Api:
         return self.bookkeeping.delete_ledger(id)
 
     # ========== 记录管理 ==========
+    # 对应前端：记一笔页、账单明细页、编辑记录弹窗。
     def get_records(self, start_date: str = "", end_date: str = "", type_filter: str = "", category_id: str = "", account_id: str = "", ledger_id: str = "", limit: int = 0):
         return self.bookkeeping.get_records(start_date, end_date, type_filter, category_id, account_id, ledger_id, limit)
 
@@ -151,11 +187,14 @@ class Api:
         return self.bookkeeping.delete_record(id)
 
     # ========== 智能推荐 ==========
+    # 供“记一笔”页面顶部的推荐卡片使用。
     def get_smart_suggestions(self):
         return self.bookkeeping.get_smart_suggestions()
 
     # ========== 统计功能 ==========
+    # 这里主要负责把“今天/本周/本月/本年”这类 UI 概念换算成 service 需要的明确日期区间。
     def get_today_summary(self, ledger_id: str = ""):
+        # 首页/统计页的“今日汇总”直接复用通用 summary 能力，只是在桥接层补日期范围。
         today = datetime.now().strftime("%Y-%m-%d")
         return self.bookkeeping.get_summary(today, today, ledger_id)
 
@@ -199,6 +238,7 @@ class Api:
         return self.bookkeeping.get_asset_trend(months)
 
     # ========== 数据导出 ==========
+    # 供侧边栏导出弹窗调用，返回的是 CSV 字符串，由前端决定如何下载。
     def export_records_csv(self, start_date: str = "", end_date: str = "", ledger_id: str = ""):
         return self.bookkeeping.export_records_csv(start_date, end_date, ledger_id)
 
@@ -208,8 +248,12 @@ class Api:
         return self.bookkeeping.export_summary_csv(year, ledger_id)
 
     # ========== 系统配置 ==========
+    # 当前只有主题配置落在 config.json；其余业务数据都由 BookkeepingService 管理到“记账数据/”下。
     def get_theme(self):
-        """获取保存的主题设置"""
+        """读取保存的主题设置。
+
+        前端初始化时会先调这个方法，再回退到 localStorage。
+        """
         config_path = self.data_dir / "config.json"
         if config_path.exists():
             try:
@@ -221,7 +265,10 @@ class Api:
         return "cute"
 
     def save_theme(self, theme: str):
-        """保存主题设置"""
+        """保存主题设置。
+
+        这里单独落到 config.json，而不是记账数据 JSON 集合中，方便与业务数据解耦。
+        """
         config_path = self.data_dir / "config.json"
         config = {}
         if config_path.exists():
@@ -239,8 +286,12 @@ class Api:
             return False
 
     # ========== 数据备份与恢复 ==========
+    # 对应前端：数据备份页。导出返回完整 JSON；导入会先校验结构，再尝试覆盖写入，并在失败时回滚。
     def export_data(self):
-        """导出所有数据为 JSON 格式"""
+        """导出完整备份 JSON。
+
+        这里按“前端可恢复”的口径导出所有核心业务实体与主题设置。
+        """
         data = {
             "version": "1.0",
             "exported_at": datetime.now().isoformat(),
@@ -259,14 +310,14 @@ class Api:
 
     @api_error_handler
     def import_data(self, json_data: dict):
-        """从 JSON 数据导入（覆盖现有数据），带数据验证和回滚机制"""
+        """从 JSON 数据导入（覆盖现有数据），带数据验证和回滚机制。"""
         if not isinstance(json_data, dict) or "data" not in json_data:
             return {"success": False, "error": "无效的备份数据格式"}
 
         data = json_data["data"]
         data_dir = self.bookkeeping.data_dir
 
-        # 定义各数据类型的必要字段
+        # 只校验最小必需字段，确保恢复后的数据至少能被 service 层重新加载。
         required_fields = {
             "categories": ["id", "name", "type"],
             "tags": ["id", "name"],
@@ -276,7 +327,7 @@ class Api:
             "records": ["id", "type", "amount", "category_id"],
         }
 
-        # 验证数据结构
+        # 逐类校验结构，尽量在真正覆盖磁盘文件前把格式问题拦住。
         for key, fields in required_fields.items():
             if key in data and isinstance(data[key], list):
                 for i, item in enumerate(data[key]):
@@ -286,7 +337,7 @@ class Api:
                     if missing:
                         return {"success": False, "error": f"{key}[{i}] 缺少必要字段: {', '.join(missing)}"}
 
-        # 备份原数据（用于回滚）
+        # 覆盖写入前先把当前 JSON 文本整体备份下来；任一环节出错时可直接原样恢复。
         backup_files = {}
         file_names = ["categories.json", "tags.json", "accounts.json", "budgets.json", "ledgers.json", "records.json"]
         for fname in file_names:
@@ -297,6 +348,8 @@ class Api:
         imported = {"categories": 0, "tags": 0, "accounts": 0, "budgets": 0, "ledgers": 0, "records": 0}
 
         try:
+            # 注意：这里直接写 JSON 文件，不走 service 的增删改接口，因此成功后前端通常需要重新加载页面状态。
+
             # 导入分类
             if "categories" in data and isinstance(data["categories"], list):
                 (data_dir / "categories.json").write_text(
@@ -340,7 +393,7 @@ class Api:
             return {"success": True, "imported": imported}
 
         except Exception as e:
-            # 回滚：恢复原数据
+            # 任意文件写入失败时都尽量回滚到导入前状态，避免出现“半导入”数据集。
             for fname, content in backup_files.items():
                 try:
                     (data_dir / fname).write_text(content, encoding="utf-8")
@@ -349,7 +402,10 @@ class Api:
             return {"success": False, "error": f"导入失败，已回滚: {str(e)}"}
 
     def get_data_stats(self):
-        """获取数据统计信息"""
+        """获取数据统计信息。
+
+        对应前端备份页顶部统计卡片，用于展示当前数据量概览。
+        """
         return {
             "categories": len(self.bookkeeping.get_categories()),
             "tags": len(self.bookkeeping.get_tags()),

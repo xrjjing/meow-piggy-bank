@@ -1,4 +1,19 @@
-"""记账模块 - 收支记录与统计（增强版）"""
+"""记账核心服务层。
+
+这个文件是项目里真正的业务中枢，负责：
+1. 初始化并维护本地 JSON 数据文件。
+2. 提供分类、标签、账户、预算、账本、记录等增删改查。
+3. 负责统计、导出、预算提醒、转账、对账等衍生能力。
+
+调用关系：
+- 上游主要来自 api.py，再由 web/app.js 通过 pywebview.api 间接触发。
+- 下游主要是“记账数据/”目录下的多个 JSON 文件。
+
+建议排障顺序：
+- 数据文件异常：先看 _ensure_files / _load_json / _save_json。
+- 余额不对：优先看 add_record / update_record / delete_record / transfer / adjust_balance / _update_account_balance。
+- 页面统计不对：继续看 get_summary / get_daily_stats / get_category_stats / get_monthly_stats / get_asset_trend。
+"""
 from __future__ import annotations
 
 import csv
@@ -15,6 +30,7 @@ from collections import defaultdict, Counter
 
 
 # ========== 常量定义 ==========
+# 这里集中放业务约束，便于前后端对齐金额、名称长度、预算阈值、可选类型等基础规则。
 MAX_AMOUNT = Decimal("999999999.99")
 MIN_AMOUNT = Decimal("0.01")
 BUDGET_WARNING_THRESHOLD = 80
@@ -28,6 +44,7 @@ VALID_BUDGET_PERIODS = {"month", "year"}
 
 
 # ========== 数据验证工具 ==========
+# 这些工具函数是 service 层所有写操作的统一入口，能减少不同方法各自做校验导致的不一致。
 def validate_amount(amount: Union[int, float, Decimal], allow_zero: bool = False) -> Decimal:
     """验证并转换金额为Decimal"""
     try:
@@ -97,6 +114,9 @@ def decimal_to_float(value: Union[Decimal, float, int]) -> float:
     return float(value) if value is not None else 0.0
 
 
+# ========== 数据模型 ==========
+# 这些 dataclass 是 JSON 持久化与内存对象之间的中间形态；
+# _load_xxx / _save_xxx 会在“字典 <-> dataclass”之间来回转换。
 @dataclass
 class Category:
     """收支分类"""
@@ -179,6 +199,8 @@ class Record:
     updated_at: str = ""
 
 
+# ========== 默认种子数据 ==========
+# 首次启动时如果对应 JSON 不存在，会写入这一批默认数据，保证应用有可用的初始分类/账户/账本。
 # 预设支出分类（含子分类）
 DEFAULT_EXPENSE_CATEGORIES = [
     Category("exp_food", "餐饮", "🍜", "#FFB7B2", "expense", "", True, 0),
@@ -229,6 +251,13 @@ DEFAULT_LEDGER = Ledger("ledger_default", "日常生活", "🏠", "#FFB7B2", Tru
 
 
 class BookkeepingService:
+    """本地 JSON 记账服务。
+
+    这个类相当于项目里的 service + repository 合体：
+    - 对上提供可直接被 Api 调用的业务方法。
+    - 对下直接读写 records/categories/accounts 等 JSON 文件。
+    """
+
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
         self.records_file = data_dir / "records.json"
@@ -237,9 +266,11 @@ class BookkeepingService:
         self.accounts_file = data_dir / "accounts.json"
         self.budgets_file = data_dir / "budgets.json"
         self.ledgers_file = data_dir / "ledgers.json"
+        # 初始化时就确保基础数据文件存在，避免前端首次进入页面就因为缺文件报错。
         self._ensure_files()
 
     def _ensure_files(self):
+        """确保数据目录和基础 JSON 文件存在。"""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if not self.records_file.exists():
             self.records_file.write_text("[]", encoding="utf-8")
@@ -258,7 +289,9 @@ class BookkeepingService:
             self._save_ledgers([default_ledger])
 
     # ========== 通用读写 ==========
+    # 这是最底层的磁盘访问能力，任何实体最终都会落到这里。
     def _load_json(self, file: Path) -> List[Dict]:
+        # 当前项目约定所有业务数据都以 UTF-8 JSON 数组形式保存。
         return json.loads(file.read_text(encoding="utf-8"))
 
     def _save_json(self, file: Path, data: List):
@@ -301,7 +334,10 @@ class BookkeepingService:
         return f"{dt.year}-{dt.month:02d}-01", f"{dt.year}-{dt.month:02d}-{last_day:02d}"
 
     def _check_budget_warnings(self, date_str: str, ledger_id: str, category_id: str, amount: float) -> List[Dict]:
-        """检查新增支出是否会触发预算超限"""
+        """检查新增支出是否会触发预算超限。
+
+        该方法只负责“预警计算”，不会直接拦截保存；前端是否弹窗提示由 add_record 的返回值决定。
+        """
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
         except Exception:
@@ -360,6 +396,7 @@ class BookkeepingService:
         return warnings
 
     # ========== 分类管理（含多级） ==========
+    # 对应前端：记一笔页分类网格、分类管理页、预算分类选择器。
     def _load_categories(self) -> List[Category]:
         data = self._load_json(self.categories_file)
         return [Category(**{k: v for k, v in item.items() if k in Category.__dataclass_fields__}) for item in data]
@@ -368,6 +405,7 @@ class BookkeepingService:
         self._save_json(self.categories_file, categories)
 
     def get_categories(self, type_filter: str = "", include_children: bool = True) -> List[Dict]:
+        # include_children=True 时返回顶级分类 + children，供页面直接渲染树状/分组视图。
         cats = self._load_categories()
         if type_filter:
             cats = [c for c in cats if c.type == type_filter]
@@ -413,6 +451,11 @@ class BookkeepingService:
         """
         删除分类并处理引用关系。
         strategy: check(检查引用) | migrate(迁移到目标分类) | cascade(级联删除)
+
+        这是一个带数据完整性保护的删除入口：
+        - check 只做影响面探测，供前端弹出确认框。
+        - migrate 会把记录/预算迁移到其他分类。
+        - cascade 会真正删掉关联记录和预算。
         """
         cats = self._load_categories()
         cats_map = {c.id: c for c in cats}
@@ -486,6 +529,7 @@ class BookkeepingService:
         }
 
     # ========== 标签管理 ==========
+    # 标签目前主要附着在记录上，因此删除标签时要顺带清理记录里的 tag 引用。
     def _load_tags(self) -> List[Tag]:
         return [Tag(**item) for item in self._load_json(self.tags_file)]
 
@@ -536,6 +580,7 @@ class BookkeepingService:
         }
 
     # ========== 账户管理 ==========
+    # 对应前端：账户卡片、记一笔账户下拉、转账弹窗、余额调整弹窗。
     def _load_accounts(self) -> List[Account]:
         data = self._load_json(self.accounts_file)
         return [Account(**{k: v for k, v in item.items() if k in Account.__dataclass_fields__}) for item in data]
@@ -581,6 +626,11 @@ class BookkeepingService:
         """
         删除账户并处理引用关系。
         strategy: check(检查引用) | migrate(迁移到目标账户) | nullify(置空) | cascade(级联删除)
+
+        排查“删账户后数据为什么变了”时，优先看这里：
+        - migrate 会迁记录并合并余额。
+        - nullify 会保留记录但清空 account_id。
+        - cascade 会直接删除该账户关联记录。
         """
         accounts = self._load_accounts()
         acc_map = {a.id: a for a in accounts}
@@ -659,7 +709,10 @@ class BookkeepingService:
         return {"total_assets": round(total, 2), "credit_debt": round(credit_debt, 2), "net_assets": round(total - credit_debt, 2)}
 
     def _update_account_balance(self, account_id: str, amount: Union[float, Decimal], is_expense: bool):
-        """更新账户余额（使用Decimal避免浮点精度问题）"""
+        """更新账户余额（使用 Decimal 避免浮点精度问题）。
+
+        几乎所有会影响余额的流程都会收敛到这里，是排查余额异常时的核心入口。
+        """
         if not account_id:
             return
         accounts = self._load_accounts()
@@ -678,6 +731,7 @@ class BookkeepingService:
         self._save_accounts(accounts)
 
     # ========== 预算管理 ==========
+    # 对应前端：预算页面、预算提醒、记一笔保存后的超支提示。
     def _load_budgets(self) -> List[Budget]:
         return [Budget(**item) for item in self._load_json(self.budgets_file)]
 
@@ -723,7 +777,10 @@ class BookkeepingService:
         return False
 
     def get_budget_status(self, ledger_id: str = "") -> List[Dict]:
-        """获取预算使用情况"""
+        """获取预算使用情况。
+
+        这里会按预算周期预先切出月度/年度记录集，再按预算类型计算 used / remaining / percentage。
+        """
         budgets = self._load_budgets()
         if ledger_id:
             budgets = [b for b in budgets if b.ledger_id == ledger_id]
@@ -785,6 +842,7 @@ class BookkeepingService:
         return result
 
     # ========== 账本管理 ==========
+    # 对应前端：侧边栏账本切换器、账本卡片列表。
     def _load_ledgers(self) -> List[Ledger]:
         return [Ledger(**item) for item in self._load_json(self.ledgers_file)]
 
@@ -825,6 +883,8 @@ class BookkeepingService:
         return False
 
     def delete_ledger(self, id: str) -> bool:
+        # 删除账本不仅是删 ledgers.json 条目，还要一并清理该账本下的记录/预算，
+        # 并先回滚这些记录对账户余额产生的历史影响。
         ledgers = self._load_ledgers()
         ledger = next((l for l in ledgers if l.id == id), None)
         if not ledger or ledger.is_default:
@@ -843,6 +903,7 @@ class BookkeepingService:
         return True
 
     # ========== 记录管理 ==========
+    # 这是页面最频繁访问的区域：首页最近记录、记一笔、账单明细、编辑弹窗都依赖这里。
     def _load_records(self) -> List[Record]:
         data = self._load_json(self.records_file)
         return [Record(**{k: v for k, v in item.items() if k in Record.__dataclass_fields__}) for item in data]
@@ -851,6 +912,8 @@ class BookkeepingService:
         self._save_json(self.records_file, records)
 
     def get_records(self, start_date: str = "", end_date: str = "", type_filter: str = "", category_id: str = "", account_id: str = "", ledger_id: str = "", limit: int = 0) -> List[Dict]:
+        # 这个查询结果会被前端直接用于渲染，因此这里顺手补上 category/account 的展示信息，
+        # 避免前端再二次 join。
         records = self._load_records()
         cats = {c.id: c for c in self._load_categories()}
         accounts = {a.id: a for a in self._load_accounts()}
@@ -889,6 +952,14 @@ class BookkeepingService:
         return result
 
     def add_record(self, rec_type: str, amount: float, category_id: str, date: str, time: str = "", note: str = "", tags: List[str] = None, account_id: str = "", ledger_id: str = "") -> Dict:
+        """新增一条收支记录。
+
+        关键链路：
+        1. 校验输入并补默认账户。
+        2. 先做预算提醒计算。
+        3. 先保存记录，再更新账户余额。
+        4. 若余额更新失败，则回滚刚写入的记录。
+        """
         # ========== 输入验证 ==========
         if rec_type not in VALID_RECORD_TYPES:
             raise ValueError(f"无效的记录类型: {rec_type}，必须是 income 或 expense")
@@ -955,6 +1026,7 @@ class BookkeepingService:
         return d
 
     def update_record(self, id: str, rec_type: str, amount: float, category_id: str, date: str, time: str = "", note: str = "", tags: List[str] = None, account_id: str = "", ledger_id: str = "") -> Optional[Dict]:
+        """更新已有记录，并重新结算账户余额影响。"""
         # ========== 输入验证 ==========
         if rec_type not in VALID_RECORD_TYPES:
             raise ValueError(f"无效的记录类型: {rec_type}，必须是 income 或 expense")
@@ -1024,6 +1096,7 @@ class BookkeepingService:
         return d
 
     def delete_record(self, id: str) -> bool:
+        # 删除记录前要先回滚它对账户余额的影响，否则账户卡片会与明细不一致。
         records = self._load_records()
         rec = next((r for r in records if r.id == id), None)
         if not rec:
@@ -1037,10 +1110,13 @@ class BookkeepingService:
         return True
 
     # ========== 账户转账 ==========
+    # 账户转账不会生成 Record，而是直接调整两个账户余额并把结果回给前端弹窗。
     def transfer(self, from_account_id: str, to_account_id: str, amount: float, date: str = "", note: str = "") -> Dict:
         """
         账户间转账，自动更新双方余额。
         从 from_account 扣减金额，向 to_account 增加金额。
+
+        这个流程只影响账户余额，不会出现在普通收支记录列表中。
         """
         # 输入验证
         if not from_account_id:
@@ -1109,6 +1185,8 @@ class BookkeepingService:
         """
         手动调整账户余额（对账校正）。
         直接将账户余额设置为新值，用于与实际余额对账。
+
+        这里不会补一条校正 Record，只返回变更前后的余额差值供前端展示。
         """
         if not account_id:
             raise ValueError("请选择账户")
@@ -1142,6 +1220,7 @@ class BookkeepingService:
         }
 
     # ========== 智能推荐 ==========
+    # 推荐结果来自历史消费频率 + 当前时段，不依赖额外模型。
     def get_smart_suggestions(self) -> List[Dict]:
         """基于历史记录和时间推荐"""
         records = self._load_records()
@@ -1199,7 +1278,9 @@ class BookkeepingService:
         return suggestions[:5]
 
     # ========== 统计功能 ==========
+    # 首页、统计页的图表和排行基本都从这里取数。
     def get_summary(self, start_date: str, end_date: str, ledger_id: str = "") -> Dict:
+        # 汇总口径：收入与支出分开累加，再给出区间结余和记录数。
         records = self._load_records()
         records = [r for r in records if start_date <= r.date <= end_date]
         if ledger_id:
@@ -1217,6 +1298,7 @@ class BookkeepingService:
         }
 
     def get_daily_stats(self, start_date: str, end_date: str, ledger_id: str = "") -> List[Dict]:
+        # 趋势图需要连续日期，因此即使某天没有记录，也会补 0 返回给前端。
         records = self._load_records()
         records = [r for r in records if start_date <= r.date <= end_date]
         if ledger_id:
@@ -1237,6 +1319,7 @@ class BookkeepingService:
         return result
 
     def get_category_stats(self, start_date: str, end_date: str, rec_type: str = "expense", ledger_id: str = "") -> List[Dict]:
+        # 分类占比图默认按父分类聚合，避免子分类过细导致饼图碎片化。
         records = self._load_records()
         records = [r for r in records if start_date <= r.date <= end_date and r.type == rec_type]
         if ledger_id:
@@ -1266,6 +1349,7 @@ class BookkeepingService:
         return result
 
     def get_monthly_stats(self, year: int, ledger_id: str = "") -> List[Dict]:
+        # 年度趋势图固定返回 12 个月，缺数据的月份会补 0。
         records = self._load_records()
         year_str = str(year)
         records = [r for r in records if r.date.startswith(year_str)]
@@ -1285,6 +1369,7 @@ class BookkeepingService:
         return result
 
     def get_weekly_stats(self, date: str = "", ledger_id: str = "") -> List[Dict]:
+        # 周统计本质上是把任意日期折算到所属周的一周范围，再复用 get_daily_stats。
         if not date:
             date = datetime.now().strftime("%Y-%m-%d")
         dt = datetime.strptime(date, "%Y-%m-%d")
@@ -1293,7 +1378,10 @@ class BookkeepingService:
         return self.get_daily_stats(monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d"), ledger_id)
 
     def get_asset_trend(self, months: int = 6) -> List[Dict]:
-        """获取资产趋势（按月）"""
+        """获取资产趋势（按月）。
+
+        算法不是回放每月快照，而是基于“当前账户总资产 - 该月之后的净变动”反推历史月末资产。
+        """
         records = self._load_records()
         accounts = self._load_accounts()
 
@@ -1326,6 +1414,7 @@ class BookkeepingService:
         return result
 
     # ========== 数据导出 ==========
+    # 导出层不直接访问底层 JSON，而是复用上面的查询结果，保证导出口径和页面展示一致。
     def export_records_csv(self, start_date: str = "", end_date: str = "", ledger_id: str = "") -> str:
         """导出记录为 CSV 格式"""
         records = self.get_records(start_date, end_date, "", "", "", ledger_id, 0)

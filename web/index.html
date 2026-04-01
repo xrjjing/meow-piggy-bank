@@ -7,9 +7,15 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <!--
+        页面总览：这是一个基于 pywebview 的单页桌面应用壳。
+        左侧是固定导航与全局操作，右侧 main.content 内按 section 切换业务页面；
+        页面切换、动态渲染、弹窗开关都由 web/app.js 负责，HTML 主要提供稳定的挂载点与结构骨架。
+    -->
     <div class="app">
-        <!-- 侧边导航 -->
+        <!-- 页面左侧固定导航：由 initNavigation、initLedgerSwitcher、initTheme 绑定交互 -->
         <nav class="sidebar">
+            <!-- 应用品牌区：猫咪头像会由 initCatInteraction 让眼睛跟随鼠标，帮助确认这是全局头图而非业务按钮 -->
             <div class="logo">
                 <div class="cat-logo">
                     <div class="cat-ear left"></div>
@@ -23,13 +29,14 @@
                 <span class="logo-text">喵喵存金罐</span>
             </div>
 
-            <!-- 账本切换 -->
+            <!-- 账本切换区：select 选项由 loadLedgers / renderLedgerSelect 注入，切换后会刷新首页与当前账本上下文 -->
             <div class="ledger-switcher">
                 <select id="current-ledger" class="ledger-select">
                     <option value="">日常生活</option>
                 </select>
             </div>
 
+            <!-- 主导航列表：每个 data-page 会被 switchPage(page) 识别，并映射到对应 section 与加载函数 -->
             <ul class="nav-list">
                 <li class="nav-item active" data-page="dashboard">
                     <span class="nav-icon">🏠</span>
@@ -69,7 +76,8 @@
                 </li>
             </ul>
             <div class="sidebar-footer">
-                <!-- 主题选择器 -->
+                <!-- 侧边栏底部全局操作区：主题、导出入口、版本号，不属于任何单独业务页面 -->
+                <!-- 主题选择器：toggleThemeMenu / selectTheme / setTheme 会在这里读写当前主题 -->
                 <div class="theme-selector-wrapper">
                     <div class="theme-popup-menu" id="themeMenu">
                         <div class="theme-group-label">亮色系</div>
@@ -121,10 +129,11 @@
             </div>
         </nav>
 
-        <!-- 主内容区 -->
+        <!-- 主工作区：所有业务页面都共存在这里，switchPage 通过 section 的 id 与 active class 控制显隐 -->
         <main class="content">
-            <!-- 首页 -->
+            <!-- 首页：默认第一页。refreshDashboard 会集中刷新问候语、资产概览、预算预警、本周趋势与最近记录 -->
             <section id="page-dashboard" class="page active">
+                <!-- 首页头部：问候语与猫咪气泡文案分别由 updateGreeting 和 refreshDashboard 相关逻辑更新 -->
                 <header class="page-header">
                     <div class="greeting">
                         <h1 id="greeting-text">早上好！</h1>
@@ -136,7 +145,7 @@
                     </div>
                 </header>
 
-                <!-- 资产概览 -->
+                <!-- 资产概览条：refreshDashboard -> pywebview.api.get_total_assets 后回填 total/debt/net 三个指标 -->
                 <div class="assets-bar">
                     <div class="asset-item">
                         <span class="asset-label">总资产</span>
@@ -152,6 +161,7 @@
                     </div>
                 </div>
 
+                <!-- 本月摘要卡片区：refreshDashboard 读取 get_month_summary 后更新收入、支出、结余 -->
                 <div class="summary-cards">
                     <div class="summary-card income">
                         <div class="card-icon">💰</div>
@@ -176,16 +186,19 @@
                     </div>
                 </div>
 
-                <!-- 预算预警 -->
+                <!-- 预算预警动态区：renderBudgetAlerts 会把超支/预警预算卡片渲染到这里 -->
                 <div id="budget-alerts" class="budget-alerts"></div>
 
+                <!-- 首页双栏工作区：左侧趋势图，右侧最近记录列表，都是 refreshDashboard 的结果区 -->
                 <div class="dashboard-grid">
+                    <!-- 左栏图表区：drawWeekChart 在 #week-chart 上绘制本周收支折线/柱状趋势 -->
                     <div class="panel week-chart">
                         <h3 class="panel-title">本周趋势</h3>
                         <div class="chart-container">
                             <canvas id="week-chart"></canvas>
                         </div>
                     </div>
+                    <!-- 右栏最近记录区：renderRecentRecords 按最新 5 条记录生成列表；空态按钮会直接跳到记一笔 -->
                     <div class="panel recent-list">
                         <h3 class="panel-title">最近记录</h3>
                         <div id="recent-records" class="records-list">
@@ -199,26 +212,30 @@
                 </div>
             </section>
 
-            <!-- 记一笔 -->
+            <!-- 记一笔页：renderAddForm 负责按当前收入/支出类型刷新分类、子分类、推荐与账户选项；saveRecord 负责提交 -->
             <section id="page-add" class="page">
                 <header class="page-header">
                     <h1>记一笔</h1>
                 </header>
 
-                <!-- 智能推荐 -->
+                <!-- 智能推荐区：renderSmartSuggestions 会根据 get_smart_suggestions 结果渲染快捷金额/分类建议 -->
                 <div id="smart-suggestions" class="smart-suggestions"></div>
 
+                <!-- 单栏录入表单：上半部分切换收支类型，下半部分填写金额、分类、账户、日期、备注 -->
                 <div class="add-form">
+                    <!-- 收支类型切换：initAddForm 绑定按钮，切换后会重置当前所选分类与标签并重新 renderAddForm -->
                     <div class="type-switch">
                         <button class="type-btn active" data-type="expense">支出 💸</button>
                         <button class="type-btn" data-type="income">收入 💰</button>
                     </div>
 
+                    <!-- 金额主输入区：saveRecord 会优先读取这里的金额作为必填字段 -->
                     <div class="amount-input-wrapper">
                         <span class="currency">¥</span>
                         <input type="number" id="input-amount" class="amount-input" placeholder="0.00" step="0.01">
                     </div>
 
+                    <!-- 分类选择区：#category-grid 渲染一级分类，#subcategory-grid 在选中父分类后由 renderSubcategories 填充 -->
                     <div class="form-section">
                         <label class="form-label">选择分类</label>
                         <div id="category-grid" class="category-grid"></div>
@@ -226,6 +243,7 @@
                         <div id="subcategory-grid" class="subcategory-grid"></div>
                     </div>
 
+                    <!-- 辅助输入区：账户与日期一起组成该笔记录的归属信息 -->
                     <div class="form-row">
                         <div class="form-group">
                             <label class="form-label">账户</label>
@@ -242,16 +260,18 @@
                         <input type="text" id="input-note" class="form-input" placeholder="写点什么...">
                     </div>
 
+                    <!-- 主提交按钮：initAddForm 绑定 saveRecord，真正调用 pywebview.api.add_record -->
                     <button id="btn-save" class="btn btn-primary btn-block">
                         保存 <span class="btn-icon">🐾</span>
                     </button>
                 </div>
             </section>
 
-            <!-- 账单列表 -->
+            <!-- 账单页：loadRecords 根据筛选条件拉取记录和汇总，renderRecordsList 决定日期分组后的展示结构 -->
             <section id="page-records" class="page">
                 <header class="page-header">
                     <h1>账单明细</h1>
+                    <!-- 顶部筛选区：initFilters 绑定类型与月份变化，切换时重新请求 get_records / get_summary -->
                     <div class="filters">
                         <select id="filter-type" class="filter-select">
                             <option value="">全部</option>
@@ -262,27 +282,31 @@
                     </div>
                 </header>
 
+                <!-- 筛选结果摘要：loadRecords 会同步更新当前筛选范围内的收入、支出、结余 -->
                 <div class="records-summary">
                     <span class="summary-item">收入: <strong id="filter-income">¥0.00</strong></span>
                     <span class="summary-item">支出: <strong id="filter-expense">¥0.00</strong></span>
                     <span class="summary-item">结余: <strong id="filter-balance">¥0.00</strong></span>
                 </div>
 
+                <!-- 动态结果区：renderRecordsList 把记录按日期分组，编辑按钮会进入 showEditModal -->
                 <div id="records-container" class="records-container"></div>
             </section>
 
-            <!-- 统计 -->
+            <!-- 统计页：loadStats 会按周/月/年切换请求汇总、趋势、分类占比与资产趋势，并驱动多张 canvas 图表 -->
             <section id="page-stats" class="page">
                 <header class="page-header">
                     <h1>收支统计</h1>
                 </header>
 
+                <!-- 周期切换区：initStatsTabs 绑定 data-period，切换后重跑 loadStats -->
                 <div class="stats-tabs">
                     <button class="stats-tab active" data-period="week">本周</button>
                     <button class="stats-tab" data-period="month">本月</button>
                     <button class="stats-tab" data-period="year">本年</button>
                 </div>
 
+                <!-- 顶部统计摘要：展示当前周期的收入、支出、结余 -->
                 <div class="stats-summary">
                     <div class="stat-item">
                         <span class="stat-label">收入</span>
@@ -298,6 +322,7 @@
                     </div>
                 </div>
 
+                <!-- 统计主图双栏：左侧趋势图，右侧支出分布饼图及图例 -->
                 <div class="stats-grid">
                     <div class="panel trend-chart">
                         <h3 class="panel-title">收支趋势</h3>
@@ -314,12 +339,13 @@
                     </div>
                 </div>
 
+                <!-- 分类排行区：renderCategoryRanking 会把支出排行渲染成文本列表 -->
                 <div class="panel ranking">
                     <h3 class="panel-title">支出排行</h3>
                     <div id="category-ranking" class="ranking-list"></div>
                 </div>
 
-                <!-- 资产趋势 -->
+                <!-- 资产趋势图：drawAssetChart 在 #asset-chart 上绘制近几个月资产变化 -->
                 <div class="panel asset-trend">
                     <h3 class="panel-title">资产趋势</h3>
                     <div class="chart-container">
@@ -328,10 +354,11 @@
                 </div>
             </section>
 
-            <!-- 账户管理 -->
+            <!-- 账户页：loadAccountsPage 负责顶部资产汇总与账户卡片网格；这里还挂着转账、对账、添加账户等入口 -->
             <section id="page-accounts" class="page">
                 <header class="page-header">
                     <h1>账户管理 💳</h1>
+                    <!-- 面板按钮区：三个按钮分别打开转账弹窗、余额调整弹窗、账户编辑弹窗 -->
                     <div class="page-actions">
                         <button class="btn btn-ghost" onclick="showTransferModal()">
                             <span>🔄</span> 转账
@@ -345,6 +372,7 @@
                     </div>
                 </header>
 
+                <!-- 账户汇总卡片：与首页资产口径一致，但面向账户管理场景单独展示 -->
                 <div class="assets-overview">
                     <div class="asset-card total">
                         <span class="asset-title">总资产</span>
@@ -360,10 +388,11 @@
                     </div>
                 </div>
 
+                <!-- 账户卡片网格：renderAccountsGrid 在这里生成每个账户卡片、编辑入口和操作按钮 -->
                 <div id="accounts-grid" class="accounts-grid"></div>
             </section>
 
-            <!-- 预算管理 -->
+            <!-- 预算页：loadBudgetsPage 请求预算状态并交给 renderBudgetsGrid 渲染；空态和按钮都走 showAddBudgetModal -->
             <section id="page-budgets" class="page">
                 <header class="page-header">
                     <h1>预算管理 🎯</h1>
@@ -372,6 +401,7 @@
                     </button>
                 </header>
 
+                <!-- 预算结果区：可能是预算卡片列表，也可能是空状态提示 -->
                 <div id="budgets-container" class="budgets-container">
                     <div class="empty-state">
                         <span class="empty-cat">📋</span>
@@ -381,21 +411,23 @@
                 </div>
             </section>
 
-            <!-- 账本管理 -->
+            <!-- 账本页：loadLedgersPage / renderLedgersGrid 负责展示账本卡片，切换默认查看范围仍通过左侧账本切换器完成 -->
             <section id="page-ledgers" class="page">
                 <header class="page-header">
                     <h1>账本管理 📚</h1>
                 </header>
 
+                <!-- 账本网格区：每个卡片通常带切换、编辑、归档/删除类操作入口 -->
                 <div id="ledgers-grid" class="ledgers-grid"></div>
             </section>
 
-            <!-- 分类管理 -->
+            <!-- 分类页：renderCategoryManagement 会分别刷新支出分类和收入分类两块区域，并为新增分类弹窗提供上下文 -->
             <section id="page-categories" class="page">
                 <header class="page-header">
                     <h1>分类管理</h1>
                 </header>
 
+                <!-- 支出分类区：渲染树状/卡片化分类结果，新增按钮默认以 expense 类型打开分类弹窗 -->
                 <div class="category-section">
                     <h3 class="section-title">💸 支出分类</h3>
                     <div id="expense-categories" class="category-manage-grid"></div>
@@ -404,6 +436,7 @@
                     </button>
                 </div>
 
+                <!-- 收入分类区：结构与支出分类区一致，数据源切换为 income -->
                 <div class="category-section">
                     <h3 class="section-title">💰 收入分类</h3>
                     <div id="income-categories" class="category-manage-grid"></div>
@@ -413,13 +446,15 @@
                 </div>
             </section>
 
-            <!-- 数据备份 -->
+            <!-- 数据备份页：initBackupPage 会先更新统计卡片，再提供 JSON 导出与导入恢复入口 -->
             <section id="page-backup" class="page">
                 <header class="page-header">
                     <h1>数据备份 💾</h1>
                 </header>
 
+                <!-- 备份工具主工作区：上方是数据规模概览，下方是导出/导入操作卡片，底部是结果反馈区 -->
                 <div class="backup-tool">
+                    <!-- 数据规模概览：updateBackupStats 会把分类、账户、账本、预算、记录数量填入对应卡片 -->
                     <div class="backup-stats">
                         <div class="backup-stat-card">
                             <span class="stat-icon">🏷️</span>
@@ -448,6 +483,7 @@
                         </div>
                     </div>
 
+                    <!-- 备份动作区：左卡触发 exportBackupData，右卡通过隐藏 file input 调 importBackupData -->
                     <div class="backup-actions">
                         <div class="backup-action-card" onclick="exportBackupData()">
                             <div class="action-icon">📤</div>
@@ -468,13 +504,16 @@
                         </div>
                     </div>
 
+                    <!-- 结果提示区：导入/导出完成后显示成功或失败反馈 -->
                     <div id="backup-result" class="backup-result" style="display:none"></div>
                 </div>
             </section>
         </main>
     </div>
 
-    <!-- 编辑记录弹窗 -->
+    <!-- 全局弹窗区：这些弹窗不属于某个 section 的常驻布局，而是由 app.js 在需要时 openModal/closeModal 控制显示 -->
+
+    <!-- 编辑记录弹窗：showEditModal 先加载记录详情并回填表单，saveEditRecord / deleteCurrentRecord 在这里提交 -->
     <div id="edit-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('edit-modal')"></div>
         <div class="modal-content">
@@ -523,7 +562,7 @@
         </div>
     </div>
 
-    <!-- 添加分类弹窗 -->
+    <!-- 分类编辑弹窗：showAddCategoryModal 会写入分类类型与父级上下文，emoji/color 选择器由 JS 动态渲染 -->
     <div id="category-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('category-modal')"></div>
         <div class="modal-content modal-sm">
@@ -554,7 +593,7 @@
         </div>
     </div>
 
-    <!-- 添加账户弹窗 -->
+    <!-- 账户弹窗：用于新增或编辑账户；信用卡专属字段通过 toggleCreditFields 控制显隐 -->
     <div id="account-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('account-modal')"></div>
         <div class="modal-content">
@@ -614,7 +653,7 @@
         </div>
     </div>
 
-    <!-- 添加预算弹窗 -->
+    <!-- 预算弹窗：预算类型切换会决定是否显示分类选择区，保存走 saveBudget -->
     <div id="budget-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('budget-modal')"></div>
         <div class="modal-content modal-sm">
@@ -650,7 +689,7 @@
         </div>
     </div>
 
-    <!-- 添加账本弹窗 -->
+    <!-- 账本弹窗：showAddLedgerModal / saveLedger 使用，图标和颜色选择器由 JS 动态生成 -->
     <div id="ledger-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('ledger-modal')"></div>
         <div class="modal-content modal-sm">
@@ -679,7 +718,7 @@
         </div>
     </div>
 
-    <!-- 导出弹窗 -->
+    <!-- 导出弹窗：showExportModal 打开，doExport 根据时间范围与类型调用后端导出 CSV -->
     <div id="export-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('export-modal')"></div>
         <div class="modal-content modal-sm">
@@ -713,7 +752,7 @@
         </div>
     </div>
 
-    <!-- 数据完整性确认弹窗 -->
+    <!-- 完整性确认弹窗：删除分类/账户等存在关联数据时，showIntegrityModal 会把影响范围和处理策略渲染到这里 -->
     <div id="integrity-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('integrity-modal')"></div>
         <div class="modal-content modal-sm">
@@ -743,7 +782,7 @@
         </div>
     </div>
 
-    <!-- 预算警告弹窗 -->
+    <!-- 预算提醒弹窗：saveRecord 返回预算预警时，showBudgetWarningModal 会把提示列表写入这里 -->
     <div id="budget-warning-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('budget-warning-modal')"></div>
         <div class="modal-content modal-sm">
@@ -760,7 +799,7 @@
         </div>
     </div>
 
-    <!-- 转账弹窗 -->
+    <!-- 转账弹窗：账户页“转账”按钮打开；executeTransfer 会读取两个账户和金额并调用后端 transfer -->
     <div id="transfer-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('transfer-modal')"></div>
         <div class="modal-content modal-sm">
@@ -799,7 +838,7 @@
         </div>
     </div>
 
-    <!-- 余额调整弹窗 -->
+    <!-- 对账弹窗：账户页“对账”按钮打开；updateCurrentBalance / updateBalanceDiff 负责实时展示差额 -->
     <div id="adjust-balance-modal" class="modal">
         <div class="modal-overlay" onclick="closeModal('adjust-balance-modal')"></div>
         <div class="modal-content modal-sm">
@@ -839,17 +878,18 @@
         </div>
     </div>
 
-    <!-- FAB 快捷记账按钮 -->
+    <!-- 全局悬浮快捷入口：不管当前在哪个页面，都可以快速跳回“记一笔” -->
     <button class="fab-btn" onclick="switchPage('add')" title="快速记账">
         <span>+</span>
     </button>
 
-    <!-- Toast -->
+    <!-- 全局轻提示：showToast 会统一写入消息与状态样式，用于保存成功、失败等短反馈 -->
     <div id="toast" class="toast hidden">
         <span class="toast-icon">😺</span>
         <span id="toast-message">保存成功！</span>
     </div>
 
+    <!-- 前端唯一主脚本入口：所有页面初始化、状态管理、API 调用与动态渲染都在 app.js 中完成 -->
     <script src="app.js"></script>
 </body>
 </html>

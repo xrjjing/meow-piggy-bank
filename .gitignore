@@ -43,9 +43,11 @@ CLAUDE.md
 CHANGELOG.md
 /.spec-workflow/
 /.serena/
+/.ace-tool/
 /.roo/
 /.claude/
 /.snow/
+/docs
 
 # 测试文件（仅开发时使用）
 tests/
