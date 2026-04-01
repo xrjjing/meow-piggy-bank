@@ -11,6 +11,7 @@
 - 数据没有落盘，先看 get_data_dir() 是否指向预期目录。
 - 前后端桥接异常，再继续看 api.py。
 """
+import argparse
 import sys
 from pathlib import Path
 
@@ -45,13 +46,33 @@ def get_data_dir():
 
 
 # 桌面窗口启动入口：负责把前端页面和 Python API 绑定到同一个 pywebview 窗口中。
+def parse_args():
+    parser = argparse.ArgumentParser(description="喵喵存金罐")
+    parser.add_argument(
+        "-d", "--debug", action="store_true", help="启用调试模式（允许打开开发者工具）"
+    )
+    parser.add_argument(
+        "--watch-web",
+        action="store_true",
+        help="开发模式：监听 web 目录变化并自动刷新前端页面",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    debug_mode = args.debug
     data_dir = get_data_dir()
-    api = Api(data_dir)
 
     # 前端 SPA 页面入口，页面内的按钮与表单最终都会落到 app.js 中的事件处理逻辑。
     web_dir = get_base_path() / "web"
-    webview.create_window(
+    api = Api(
+        data_dir,
+        debug_mode=debug_mode,
+        web_dir=web_dir,
+        watch_web=args.watch_web,
+    )
+    window = webview.create_window(
         title="喵喵存金罐",
         url=str(web_dir / "index.html"),
         js_api=api,
@@ -59,7 +80,8 @@ def main():
         height=750,
         min_size=(900, 650),
     )
-    webview.start(debug=False)
+    api.set_window(window)
+    webview.start(debug=debug_mode)
     sys.exit()
 
 

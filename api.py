@@ -14,12 +14,18 @@
 - 桥接层本身没有额外逻辑时，再继续看 services/bookkeeping.py 中对应方法。
 """
 import json
+import logging
+import threading
 import traceback
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from services.bookkeeping import BookkeepingService
+
+
+logger = logging.getLogger(__name__)
 
 
 # 统一把 Python 异常转成前端更容易消费的结构化结果，
@@ -58,14 +64,109 @@ class Api:
     - 少量方法负责主题配置、时间区间推导、备份导入导出。
     """
 
-    def __init__(self, data_dir: Path):
+    WEB_WATCH_SUFFIXES = {".html", ".css", ".js"}
+
+    def __init__(
+        self,
+        data_dir: Path,
+        debug_mode: bool = False,
+        web_dir: Optional[Path] = None,
+        watch_web: bool = False,
+    ):
         # data_dir 是应用运行目录或打包后的用户数据目录；实际账本数据都在其下的“记账数据/”。
         self.data_dir = data_dir
         self.bookkeeping = BookkeepingService(data_dir / "记账数据")
+        self._window = None
+        self._debug_mode = debug_mode
+        self._web_dir = web_dir
+        self._watch_web = bool(
+            watch_web and debug_mode and web_dir and web_dir.exists()
+        )
+        self._frontend_reload_version = str(time.time_ns())
+        self._frontend_reload_lock = threading.Lock()
+        self._web_watcher_started = False
 
     def __dir__(self):
         # pywebview 会根据对象可见方法名生成 JS 可调用接口，这里显式限制为类上可调用成员。
-        return [name for name, val in self.__class__.__dict__.items() if callable(val)]
+        return [
+            name
+            for name, val in self.__class__.__dict__.items()
+            if callable(val) and not name.startswith("_")
+        ]
+
+    def set_window(self, window):
+        self._window = window
+        if self._watch_web and not self._web_watcher_started:
+            self._start_web_watcher()
+
+    def is_debug_mode(self):
+        return {"debug": self._debug_mode}
+
+    def get_frontend_reload_version(self):
+        return {
+            "enabled": self._watch_web,
+            "version": self._frontend_reload_version,
+        }
+
+    def _collect_web_snapshot(self) -> dict[str, int]:
+        snapshot = {}
+        if not self._web_dir:
+            return snapshot
+
+        for path in self._web_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in self.WEB_WATCH_SUFFIXES:
+                continue
+            rel_path = str(path.relative_to(self._web_dir))
+            try:
+                snapshot[rel_path] = path.stat().st_mtime_ns
+            except FileNotFoundError:
+                continue
+        return snapshot
+
+    def _start_web_watcher(self):
+        if self._web_watcher_started:
+            return
+        self._web_watcher_started = True
+
+        def worker():
+            logger.info(f"前端自动刷新监听已启动: {self._web_dir}")
+            last_snapshot = self._collect_web_snapshot()
+            while True:
+                time.sleep(1.0)
+                try:
+                    current_snapshot = self._collect_web_snapshot()
+                    if current_snapshot == last_snapshot:
+                        continue
+                    last_snapshot = current_snapshot
+                    with self._frontend_reload_lock:
+                        self._frontend_reload_version = str(time.time_ns())
+                        latest_version = self._frontend_reload_version
+                    logger.info("检测到 web 目录变更，正在通知前端刷新")
+                    self._notify_frontend_reload(latest_version)
+                except Exception as e:
+                    logger.warning(f"监听 web 目录失败: {e}")
+
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name="web-hot-reload-watcher",
+        ).start()
+
+    def _notify_frontend_reload(self, version: str):
+        if not self._window:
+            return
+        payload = json.dumps({"version": version}, ensure_ascii=False)
+        script = f"""
+            window.dispatchEvent(new CustomEvent('meow:frontend-reload', {{
+                detail: {payload}
+            }}));
+        """
+        try:
+            self._window.run_js(script)
+        except Exception as e:
+            logger.debug(f"推送前端刷新事件失败（通常发生在页面重载瞬间）: {e}")
 
     # ========== 分类管理（含多级） ==========
     # 对应前端：分类管理页、记一笔页面的分类选择器。
